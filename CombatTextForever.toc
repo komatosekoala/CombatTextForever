@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: CombatTextForever
 ## Notes: Scrolling combat text that keeps white swings and ability hits apart.
-## Version: 1.0.0
+## Version: 1.2.0
 ## SavedVariables: CombatTextForeverDB
 ## OptionalDeps: LibSharedMedia-3.0
 

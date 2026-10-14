@@ -816,7 +816,7 @@ local LIMITS = {
 	"  - who dealt a hit: in a group, other players' hits on your target appear as white swings too",
 	"  - the amount removed by a partial resist, block or absorb (only that it happened), and overkill",
 	"  - a pet's melee hits while you are swinging in melee beside it (they show as white swings)",
-	"  - outgoing heals, and damage over time as its own class",
+	"  - outgoing heals, and damage-over-time from procs you do not cast (Deadly Poison)",
 	"White and ability hits are told apart by matching hits to your own casts; /ctf check tests that against the damage meter.",
 }
 

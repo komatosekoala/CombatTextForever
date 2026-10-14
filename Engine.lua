@@ -5,6 +5,8 @@
 -- Outgoing classes are therefore derived, in this order:
 --   yellow  a hit on the target in the same frame as one of my casts, or the first hit
 --           of the right school after a cast whose hit lands late (Fireball, Aimed Shot)
+--   dot     a tick of one of my bleeds or curses: the same size every time, on a fixed
+--           beat counted from the cast (Garrote, Rupture, Corruption)
 --   ranged  the first physical hit after one of my thrown or shot auto attacks
 --   pet     a hit in the same frame as one of my pet's casts, or a physical hit nothing
 --           else accounts for while my pet is on the target and I cannot be swinging
@@ -38,7 +40,7 @@ local MAX_LINES = 300
 
 -- Seconds each outgoing class waits to merge identical events. Only "other" merges by
 -- default, so two poison procs landing together read as one line.
-local MERGE_WINDOW = { white = 0, yellow = 0, ranged = 0, pet = 0, other = 0.3 }
+local MERGE_WINDOW = { white = 0, yellow = 0, dot = 0, ranged = 0, pet = 0, other = 0.3 }
 
 -- School masks by the word a spell description uses for them.
 local SCHOOL_WORDS = { holy = 2, fire = 4, nature = 8, frost = 16, shadow = 32, arcane = 64 }
@@ -278,7 +280,9 @@ local function CloseFight()
 	-- hit in the same frame as its cast, is one whose hit lands late (Arcane Shot).
 	for spellID, total in pairs(meter or {}) do
 		local stats = ns.db.spells[spellID]
-		if stats and total > 0 and stats.claims == 0 and record.casts[spellID] and not RANGED_SPELLS[spellID] then
+		-- A spell that only ticks (Garrote) also never hits with its cast, but is not late.
+		if stats and total > 0 and stats.claims == 0 and not stats.periodic and record.casts[spellID]
+			and not RANGED_SPELLS[spellID] then
 			stats.late = true
 		end
 	end
@@ -302,13 +306,18 @@ function Engine.CheckLines()
 	if not record then return { "No finished fight yet." } end
 	if not record.meter then return { "Last fight: the damage meter was not readable, nothing to compare against." } end
 	local lines, ranged = { "Last fight (" .. tostring(record.ctx) .. "), classification against the damage meter:" }, 0
+	-- The meter has one row per spell, covering its direct hits and its ticks together.
+	local bySpell = {}
 	for label, sum in pairs(record.sums) do
 		local class, id = label:match("^(%a+):(%d+)$")
-		if class == "yellow" then
-			lines[#lines + 1] = CheckLine(ns.SpellName(tonumber(id)), sum, record.meter[tonumber(id)] or 0)
+		if class == "yellow" or class == "dot" then
+			bySpell[tonumber(id)] = (bySpell[tonumber(id)] or 0) + sum
 		elseif class == "ranged" then
 			ranged = ranged + sum
 		end
+	end
+	for spellID, sum in pairs(bySpell) do
+		lines[#lines + 1] = CheckLine(ns.SpellName(spellID), sum, record.meter[spellID] or 0)
 	end
 	lines[#lines + 1] = CheckLine("White swings", record.sums.white or 0, record.meter[AUTO_ATTACK] or 0)
 	if ranged > 0 or record.meter[AUTO_SHOT] then
@@ -517,6 +526,7 @@ end
 -- text; the rest are announced when their duration qualifies.
 local function OnUnclaimedCast(cast)
 	local stats = cast.stats
+	if stats.periodic then return end -- a bleed or curse on the enemy, shown by its ticks
 	if stats.claims * 2 >= math.max(stats.casts, 1) then return end
 	local seconds = DescribedDuration(cast.spellID)
 	if seconds and Qualifies(seconds, cast.spellID) then
@@ -580,6 +590,108 @@ local function TakeLate(e)
 	end
 end
 
+-- Damage over time. A bleed or curse of mine ticks on the target with no cast at the
+-- moment of the tick, so nothing above accounts for it. What gives a tick away is that
+-- every tick of one application is the same size, and they arrive at a fixed interval
+-- counted from the cast. The size and interval are learned the first time a spell is
+-- used (two matching ticks are needed) and remembered for the next application.
+local TICK_INTERVALS = { 3, 2, 1 }
+local TICK_SLACK = 0.6      -- seconds a tick may be off its expected moment
+local MAX_SEEN = 12
+local activeDots = {}       -- my effects ticking on the current target
+local periodicDuration = {} -- [spellID] = seconds, or false when the text gives none
+local targetSerial = 0      -- changes whenever I change target
+
+-- Longest "over N sec" in a spell's description: how long its periodic damage lasts.
+local function PeriodicDuration(spellID)
+	local cached = periodicDuration[spellID]
+	if cached ~= nil then return cached or nil end
+	local text = Description(spellID)
+	if not text then return nil end
+	local longest = false
+	for number in text:gmatch("over (%d+%.?%d*) sec") do
+		local seconds = tonumber(number)
+		if seconds and (not longest or seconds > longest) then longest = seconds end
+	end
+	periodicDuration[spellID] = longest
+	return longest or nil
+end
+
+local function EndDot(index)
+	local dot = table.remove(activeDots, index)
+	if dot.fromHistory and dot.ticks == 0 and dot.unmatched >= 2 then
+		-- What was remembered no longer fits (a new rank, more attack power): learn again.
+		dot.stats.tick = nil
+	end
+end
+
+local function StartDot(spellID, name, stats, now)
+	local duration = PeriodicDuration(spellID)
+	local school = duration and DescribedSchool(spellID)
+	if not school then return end
+	stats.periodic = true
+	for index = #activeDots, 1, -1 do
+		if activeDots[index].spellID == spellID then EndDot(index) end
+	end
+	local known = stats.tick
+	activeDots[#activeDots + 1] = {
+		class = "dot", spellID = spellID, name = name, stats = stats, school = school,
+		start = now, expires = now + duration + 1.5, serial = targetSerial,
+		amount = known and known.amount, interval = known and known.interval,
+		fromHistory = known ~= nil, ticks = 0, unmatched = 0, seen = {},
+	}
+end
+
+-- Whether `stamp` falls on one of the effect's ticks for the given interval.
+local function OnBeat(dot, stamp, interval)
+	local elapsed = stamp - dot.start
+	local phase = elapsed % interval
+	return elapsed >= interval - TICK_SLACK and (phase <= TICK_SLACK or phase >= interval - TICK_SLACK)
+end
+
+-- First use of a spell: a hit is a tick once an earlier hit of exactly the same size
+-- sits on the same beat.
+local function LearnTick(dot, e)
+	for _, interval in ipairs(TICK_INTERVALS) do
+		if OnBeat(dot, e.stamp, interval) then
+			for _, earlier in ipairs(dot.seen) do
+				if earlier.amount == e.amount and e.stamp - earlier.stamp >= interval - TICK_SLACK
+					and OnBeat(dot, earlier.stamp, interval) then
+					dot.amount, dot.interval, dot.ticks = e.amount, interval, 1
+					dot.stats.tick = { amount = e.amount, interval = interval }
+					return true
+				end
+			end
+		end
+	end
+	if #dot.seen < MAX_SEEN then dot.seen[#dot.seen + 1] = { stamp = e.stamp, amount = e.amount } end
+	return false
+end
+
+-- The effect of mine that this hit is a tick of, if any.
+local function MatchTick(e)
+	if e.result ~= "HIT" or e.crit or e.glancing or e.crushing or e.partial then return nil end
+	for index = #activeDots, 1, -1 do
+		local dot = activeDots[index]
+		if e.stamp > dot.expires or dot.serial ~= targetSerial then
+			EndDot(index)
+		elseif dot.school == e.school then
+			if not dot.amount then
+				if LearnTick(dot, e) then return dot end
+			else
+				-- The first tick may differ a little from last time; after that, exact.
+				local tolerance = dot.ticks > 0 and 1 or math.max(1, dot.amount * 0.12)
+				if math.abs(e.amount - dot.amount) <= tolerance and OnBeat(dot, e.stamp, dot.interval) then
+					dot.amount, dot.ticks = e.amount, dot.ticks + 1
+					dot.stats.tick = { amount = e.amount, interval = dot.interval }
+					return dot
+				end
+				dot.unmatched = dot.unmatched + 1
+			end
+		end
+	end
+end
+
 -- Whether my melee auto attack is switched on, by the client's events or by asking it.
 local function MeleeActive()
 	if meleeFlag then return true end
@@ -624,6 +736,7 @@ end
 
 -- Gives a hit its class. `cast` is the cast that claimed it in its own frame, if one did.
 local function Classify(e, cast)
+	cast = cast or MatchTick(e)
 	local petSwing = not cast and e.school == SCHOOL_PHYSICAL and IsPetSwing()
 	if not cast and not (petSwing and ResemblesPet(e)) then cast = TakeLate(e) end
 	if cast then
@@ -905,6 +1018,7 @@ function handlers.UNIT_SPELLCAST_SUCCEEDED(unit, _, spellID)
 		stats = { casts = 0, claims = 0 }
 		ns.db.spells[spellID] = stats
 	end
+	if mine then StartDot(spellID, name, stats, now) end
 	local late = LandsLate(spellID, stats)
 	buffer[#buffer + 1] = {
 		isCast = true, stamp = now, spellID = spellID, name = name, stats = stats,
@@ -982,6 +1096,7 @@ end
 
 function handlers.PLAYER_TARGET_CHANGED()
 	lastComboPoints = ComboPoints() or 0
+	targetSerial = targetSerial + 1
 end
 
 function handlers.PLAYER_XP_UPDATE(unit)
@@ -1094,6 +1209,7 @@ function Engine.Disable()
 	wipe(buffer)
 	wipe(held)
 	wipe(pendingLate)
+	wipe(activeDots)
 	driver:Hide()
 end
 

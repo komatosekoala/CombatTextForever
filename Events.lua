@@ -88,6 +88,8 @@ end
 AddHitClass("outgoing", "out.white", "Melee swing", { 1, 1, 1 }, "%a%e", "%r", "Outgoing",
 	{ { variant = "GLANCING", name = "Melee swing glancing blow", color = { 0.75, 0.75, 0.75 } } })
 AddHitClass("outgoing", "out.yellow", "Ability", { 1, 0.82, 0 }, "%s %a%e", "%s %r", "Outgoing")
+-- Ticks of my own bleeds and curses (Garrote, Rupture, Corruption).
+AddHitClass("outgoing", "out.dot", "Damage over time", { 0.9, 0.7, 0.25 }, "%s %a%e", "%s %r", "Outgoing")
 AddHitClass("outgoing", "out.ranged", "Ranged attack", { 0.45, 0.78, 1 }, "%s %a%e", "%s %r", "Outgoing")
 AddHitClass("outgoing", "out.other", "Proc or poison", { 0.55, 0.9, 0.45 }, "%a%e", "%r", "Outgoing")
 

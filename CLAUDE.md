@@ -112,7 +112,12 @@ Neither path has been seen working in game.
 
 ## Known gaps
 
-- Bleed ticks (Garrote, Rupture) are physical and unclaimed, so they show as white.
+- Damage over time from a spell the player casts is the class `dot` (owner reported
+  Garrote ticks showing as white swings). A tick is recognised by being the same size as
+  the others and on a fixed beat from the cast; the size and interval are learned the
+  first time (two matching ticks) and kept in `db.spells[id].tick`. Changing target
+  drops the tracking. Not seen working in game. Ticks from procs with no cast (Deadly
+  Poison) are still `other`.
 - Any other player or pet hitting the same target, grouped or not, shows as white.
 - Partial resist/block/absorb amounts, overkill, pet outgoing damage and outgoing heals
   have no data source.

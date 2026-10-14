@@ -3,7 +3,7 @@
 
 local ADDON, ns = ...
 
-ns.VERSION = "1.0.0"
+ns.VERSION = "1.2.0"
 
 local issecret = issecretvalue or function() return false end
 ns.issecret = issecret
